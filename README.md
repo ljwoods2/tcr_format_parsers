@@ -45,6 +45,6 @@ python tcr_format_parsers/CRESTA_CellRanger/parse_cresta_runs.py \
 
 IEDB data
 ```bash
-python tcr_format_parsers/IEDB/fetch_IEDB_triads_brute.py \
+python tcr_format_parsers/IEDB/fetch_IEDB_triads.py \
     -o output_csv.csv
 ```
