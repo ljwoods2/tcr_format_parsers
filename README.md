@@ -1,5 +1,5 @@
 
-These subdirectories contain formatt parsing code for different TCR, peptide, MHC triad input sources
+These subdirectories contain format parsing code for different TCR, peptide, MHC triad input sources
 
 All formatters output into the uniform CSV format:
 
