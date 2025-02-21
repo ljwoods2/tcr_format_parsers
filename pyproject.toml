@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.2", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tcr_format_parsers"
+version = "0.1.0"
+description = "Package for parsing TCR, peptide, MHC triad data into a uniform CSV format"
+authors = [
+    { name = "Lawson Woods", email = "lawsonw84@gmail.com" }
+]
+dependencies = [
+    "scipy",
+    "numpy",
+    "polars",
+    "h5py",
+    "requests",
+    "dask",
+    "distributed",
+    "Stitchr",
+    "tidytcells",
+]
+
+[tool.setuptools]
+packages = ["tcr_format_parsers"]
