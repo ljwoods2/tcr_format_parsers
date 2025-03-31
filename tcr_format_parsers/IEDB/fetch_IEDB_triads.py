@@ -5,8 +5,12 @@ import io
 from tcr_format_parsers.common.MHCCodeConverter import (
     DQA_FOR,
     HLACodeWebConverter,
+    shorten_to_fullname,
+    is_fullname,
 )
-from tcr_format_parsers.common.TCRUnique import hash_tcr_sequence
+from tcr_format_parsers.common.TCRUtils import (
+    hash_tcr_sequence,
+)
 import tidytcells as tt
 import argparse
 from Stitchr import stitchrfunctions as fxn
@@ -58,23 +62,13 @@ def chunk_list(lst, chunk_size):
         yield lst[i : i + chunk_size]
 
 
-def shorten_to_fullname(mhc_name):
-    colon = mhc_name.count(":")
-    if colon == 1:
-        return mhc_name
-    elif colon >= 2:
-        return mhc_name.split(":")[0] + ":" + mhc_name.split(":")[1]
-    else:
-        return mhc_name
-
-
-def is_fullname(mhc_name):
-    return mhc_name.count(":") == 1
-
-
 def infer_hla_chain(mhc_name):
 
-    nullchains = {"mhc_1_name": None, "mhc_2_name": None}
+    nullchains = {
+        "mhc_1_name": None,
+        "mhc_2_name": None,
+        "mhc_name_inferred": None,
+    }
 
     if (
         mhc_name.startswith("HLA-A")
@@ -90,6 +84,7 @@ def infer_hla_chain(mhc_name):
             return {
                 "mhc_1_name": mhc_name.split("HLA-")[1],
                 "mhc_2_name": "B2M",
+                "mhc_name_inferred": "2",
             }
         else:
             return nullchains
@@ -99,6 +94,7 @@ def infer_hla_chain(mhc_name):
             return {
                 "mhc_1_name": "DRA1*01:02",
                 "mhc_2_name": mhc_name.split("HLA-")[1],
+                "mhc_name_inferred": "1",
             }
         else:
             return nullchains
@@ -111,6 +107,7 @@ def infer_hla_chain(mhc_name):
                 return {
                     "mhc_1_name": a_chain,
                     "mhc_2_name": b_chain,
+                    "mhc_name_inferred": "1",
                 }
             else:
                 return nullchains
@@ -120,7 +117,7 @@ def infer_hla_chain(mhc_name):
 
     elif mhc_name.startswith("HLA-DPB") and mhc_name != "HLA-DPB":
         # https://www.uniprot.org/uniprotkb/P20036/entry
-        return {"mhc_1_name": None, "mhc_2_name": None}
+        return nullchains
         # return {"mhc_1_name": "DPA1", "mhc_2_name": mhc_name.split("HLA-")[1]}
     else:
         return nullchains
@@ -139,20 +136,24 @@ def sort_triad_types(df, species):
             }
         )
         .select(
-            [
-                "receptor_id",
-                "qualitative_measure",
-                "peptide",
-                "mhc_class",
-                "mhc_1_name",
-                "mhc_2_name",
-                "mhc_1_type",
-                "mhc_2_type",
-                "tcr_1_type",
-                "tcr_2_type",
-                "tcr_1_seq",
-                "tcr_2_seq",
-            ]
+            pl.exclude(
+                [
+                    "chain_1__curated_v_gene",
+                    "chain_1__calculated_v_gene",
+                    "chain_1__curated_j_gene",
+                    "chain_1__calculated_j_gene",
+                    "chain_1__cdr3_curated",
+                    "chain_1__cdr3_calculated",
+                    "chain_1__protein_sequence",
+                    "chain_2__curated_v_gene",
+                    "chain_2__calculated_v_gene",
+                    "chain_2__curated_j_gene",
+                    "chain_2__calculated_j_gene",
+                    "chain_2__cdr3_curated",
+                    "chain_2__cdr3_calculated",
+                    "chain_2__protein_sequence",
+                ]
+            )
         )
         # should be noop
         .unique()
@@ -428,23 +429,26 @@ def aa_from_tcr_chain(df, chain, species, v_gene, j_gene, cdr3, outcol):
 
 def format_df(df, cognate, converter, tcr_chain_sequence_stitched):
     keep_cols = [
-        "cognate",
         "job_name",
+        "source",
+        "qualitative_measure",
+        "mhc_allele_evidence",
+        "cognate",
         "peptide",
-        "mhc_1_type",
+        "species",
+        "mhc_name_inferred",
+        "mhc_class",
+        "mhc_1_chain",
         "mhc_1_name",
         "mhc_1_seq",
-        "mhc_2_type",
+        "mhc_2_chain",
         "mhc_2_name",
         "mhc_2_seq",
-        "tcr_1_type",
-        "tcr_1_name",
+        "tcr_sequence_stitched",
+        "tcr_1_chain",
         "tcr_1_seq",
-        "tcr_2_type",
-        "tcr_2_name",
+        "tcr_2_chain",
         "tcr_2_seq",
-        "qualitative_measure",
-        "tcr_chain_sequence_stitched",
     ]
     df = (
         df.with_columns(
@@ -464,29 +468,25 @@ def format_df(df, cognate, converter, tcr_chain_sequence_stitched):
                     return_dtype=pl.String,
                 )
                 .alias("mhc_2_seq"),
-                pl.col("tcr_1_seq")
-                .map_elements(hash_tcr_sequence, return_dtype=pl.String)
-                .alias("tcr_1_name"),
-                pl.col("tcr_2_seq")
-                .map_elements(hash_tcr_sequence, return_dtype=pl.String)
-                .alias("tcr_2_name"),
                 pl.lit(cognate).alias("cognate"),
                 pl.lit(tcr_chain_sequence_stitched).alias(
                     "tcr_chain_sequence_stitched"
                 ),
+                pl.lit("IEDB").alias("source"),
             ]
         )
         .with_columns(
             pl.concat_str(
                 [
                     pl.col("peptide"),
-                    pl.col("mhc_1_name"),
-                    pl.col("mhc_2_name"),
-                    pl.col("tcr_1_name"),
-                    pl.col("tcr_2_name"),
+                    pl.col("mhc_1_seq"),
+                    pl.col("mhc_2_seq"),
+                    pl.col("tcr_1_seq"),
+                    pl.col("tcr_2_seq"),
                 ],
-                separator="_",
-            ).alias("job_name")
+            )
+            .map_elements(lambda x: hash_tcr_sequence(x, "md5"))
+            .alias("job_name")
         )
         .select(keep_cols)
         .unique()
@@ -515,10 +515,7 @@ CHAIN_COLS = [
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--output",
-        "-o",
-        help="Output directory path",
-        required=True,
+        "--output", "-o", help="Output directory path", default="output.csv"
     )
     parser.add_argument(
         "-n",
@@ -606,7 +603,8 @@ if __name__ == "__main__":
         # "receptor_ids": "not.is.null",
         "and": "(mhc_restriction.not.is.null,mhc_restriction.not.like.*mutant*)",
         # "or": "(mhc_allele_evidence.eq.Single allele present,mhc_allele_evidence.eq.MHC binding assay)",
-        "mhc_allele_evidence": "eq.Single allele present",
+        # https://help.iedb.org/hc/en-us/articles/360053990892-What-are-the-IEDB-Filter-Options#:~:text=Single%20allele%20present%3A%20The%20restriction,the%20use%20of%20multimer%20technology.
+        # "mhc_allele_evidence": "eq.Single allele present",
         "qualitative_measure": f"like.{measure}*",
         "select": col_string,
     }
@@ -654,8 +652,8 @@ if __name__ == "__main__":
     )
 
     tbl = tbl.with_columns(
-        pl.lit("tcr_alpha").alias("tcr_1_type"),
-        pl.lit("tcr_beta").alias("tcr_2_type"),
+        pl.lit("alpha").alias("tcr_1_chain"),
+        pl.lit("beta").alias("tcr_2_chain"),
     )
 
     tbl = tbl.collect()
@@ -671,9 +669,15 @@ if __name__ == "__main__":
             .alias("split_parts")
         )
         .unnest("split_parts")
-        .rename({"field_0": "mhc_1_name", "field_1": "mhc_2_name"})
+        .rename(
+            {
+                "field_0": "mhc_1_name",
+                "field_1": "mhc_2_name",
+            }
+        )
         .with_columns(
             pl.col("mhc_1_name").str.replace("HLA-", "").alias("mhc_1_name"),
+            pl.lit("neither").alias("mhc_name_inferred"),
         )
     )
 
@@ -685,6 +689,7 @@ if __name__ == "__main__":
         {
             "mhc_1_name": pl.String,
             "mhc_2_name": pl.String,
+            "mhc_name_inferred": pl.String,
         }
     )
 
@@ -708,13 +713,14 @@ if __name__ == "__main__":
     ).with_columns(
         [
             pl.when(pl.col("mhc_class") == "I")
-            .then(pl.lit("hla_I_alpha"))
-            .otherwise(pl.lit("hla_II_alpha"))
-            .alias(f"mhc_1_type"),
+            .then(pl.lit("heavy"))
+            .otherwise(pl.lit("alpha"))
+            .alias(f"mhc_1_chain"),
             pl.when(pl.col("mhc_class") == "I")
-            .then(pl.lit("hla_I_beta"))
-            .otherwise(pl.lit("hla_II_beta"))
-            .alias(f"mhc_2_type"),
+            .then(pl.lit("light"))
+            .otherwise(pl.lit("beta"))
+            .alias(f"mhc_2_chain"),
+            pl.lit("human").alias("species"),
         ]
     )
     # Also available in dset: Mamu, Gaga
@@ -767,10 +773,10 @@ if __name__ == "__main__":
 
     converter = HLACodeWebConverter()
 
-    both = format_df(both, cognate, converter, "neither chain")
-    chain_1_known = format_df(chain_1_known, cognate, converter, "chain 2")
-    chain_2_known = format_df(chain_2_known, cognate, converter, "chain 1")
-    neither_known = format_df(neither_known, cognate, converter, "both chains")
+    both = format_df(both, cognate, converter, "neither")
+    chain_1_known = format_df(chain_1_known, cognate, converter, "2")
+    chain_2_known = format_df(chain_2_known, cognate, converter, "1")
+    neither_known = format_df(neither_known, cognate, converter, "both")
 
     out = pl.concat([both, chain_1_known, chain_2_known, neither_known])
     out.write_csv(f"{args.output}")

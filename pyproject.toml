@@ -15,10 +15,10 @@ dependencies = [
     "polars",
     "h5py",
     "requests",
-    "dask",
-    "distributed",
     "Stitchr",
     "tidytcells",
+    "git+https://github.com/oxpig/ANARCI",
+    "editdistance",
 ]
 
 [tool.setuptools]

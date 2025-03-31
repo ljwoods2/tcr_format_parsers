@@ -25,7 +25,7 @@ def use_32bit_dtypes(df):
 
 class CellRangerOutput:
 
-    def __init__(self, directory_path: list):
+    def __init__(self, directory_path: list, filtered_bc_matrix: bool = False):
 
         dir_path = None
         if isinstance(directory_path, str):
@@ -38,6 +38,11 @@ class CellRangerOutput:
         self.dir_path = dir_path
         self.job_name = dir_path.name
         self.donor_num = re.findall(r"\d+", self.job_name)[0]
+
+        if filtered_bc_matrix:
+            self.mtx_prefix = "filtered"
+        else:
+            self.mtx_prefix = "raw"
 
     def get_filtered_contig_df(self):
         """
@@ -57,41 +62,43 @@ class CellRangerOutput:
         filt_annot_df = use_32bit_dtypes(filt_annot_df)
         return filt_annot_df
 
-    def get_feature_matrix_barcodes_as_df(self):
-        """
-        https://www.10xgenomics.com/support/software/cell-ranger/latest/analysis/outputs/cr-outputs-h5-matrices
+    # def get_feature_matrix_barcodes_as_df(self):
+    #     """
+    #     https://www.10xgenomics.com/support/software/cell-ranger/latest/analysis/outputs/cr-outputs-h5-matrices
 
-        Returns
-        -------
-        pl.LazyFrame
-            barcode : str
-                cell barcode
-            index : u32
-                index of barcode in feature matrix
-        """
-        mtx_h5 = h5py.File(
-            self.dir_path / "outs/multi/count/raw_feature_bc_matrix.h5"
-        )
-        barcode_ndarr = mtx_h5["matrix"]["barcodes"][:].astype(str)
-        return pl.DataFrame({"barcode": barcode_ndarr}).with_row_index()
+    #     Returns
+    #     -------
+    #     pl.LazyFrame
+    #         barcode : str
+    #             cell barcode
+    #         index : u32
+    #             index of barcode in feature matrix
+    #     """
+    #     mtx_h5 = h5py.File(
+    #         self.dir_path
+    #         / f"outs/multi/count/{self.mtx_prefix}_feature_bc_matrix.h5"
+    #     )
+    #     barcode_ndarr = mtx_h5["matrix"]["barcodes"][:].astype(str)
+    #     return pl.DataFrame({"barcode": barcode_ndarr}).with_row_index()
 
-    def get_feature_matrix_featnames_as_df(self):
-        """
-        https://www.10xgenomics.com/support/software/cell-ranger/latest/analysis/outputs/cr-outputs-h5-matrices
+    # def get_feature_matrix_featnames_as_df(self):
+    #     """
+    #     https://www.10xgenomics.com/support/software/cell-ranger/latest/analysis/outputs/cr-outputs-h5-matrices
 
-        Returns
-        -------
-        pl.LazyFrame
-            feature_name : str
-                name of feature
-            index : u32
-                index of feature in feature matrix
-        """
-        mtx_h5 = h5py.File(
-            self.dir_path / "outs/multi/count/raw_feature_bc_matrix.h5"
-        )
-        featname_ndarr = mtx_h5["matrix"]["features"]["name"][:].astype(str)
-        return pl.DataFrame({"feature_name": featname_ndarr}).with_row_index()
+    #     Returns
+    #     -------
+    #     pl.LazyFrame
+    #         feature_name : str
+    #             name of feature
+    #         index : u32
+    #             index of feature in feature matrix
+    #     """
+    #     mtx_h5 = h5py.File(
+    #         self.dir_path
+    #         / f"outs/multi/count/{self.mtx_prefix}_feature_bc_matrix.h5"
+    #     )
+    #     featname_ndarr = mtx_h5["matrix"]["features"]["name"][:].astype(str)
+    #     return pl.DataFrame({"feature_name": featname_ndarr}).with_row_index()
 
     def get_feature_matrix_as_ndarr(self):
         """
@@ -107,12 +114,35 @@ class CellRangerOutput:
             cell barcodes
         """
         mtx_h5 = h5py.File(
-            self.dir_path / "outs/multi/count/raw_feature_bc_matrix.h5"
+            self.dir_path
+            / f"outs/multi/count/{self.mtx_prefix}_feature_bc_matrix.h5"
         )
         barcode_ndarr = mtx_h5["matrix"]["barcodes"][:].astype(str)
-        feature_name_ndarr = mtx_h5["matrix"]["features"]["name"][:].astype(
-            str
-        )
+
+        feature_name_ndarr = mtx_h5["matrix"]["features"]["id"][:].astype(str)
+        fn_idx = 0
+        for fn in feature_name_ndarr:
+            if fn.startswith("FBC"):
+                break
+            fn_idx += 1
+
+        feature_name_ndarr = feature_name_ndarr[fn_idx:]
+
+        # compatibility with different cellranger run configs
+        if feature_name_ndarr[0].split("_")[2].isdigit():
+            seq_arr = mtx_h5["matrix"]["features"]["sequence"][fn_idx:].astype(
+                str
+            )
+            feature_name_ndarr = np.array(
+                [
+                    "FBC_"
+                    + "_".join(feature_name_ndarr[i].split("_")[:2])[3:]
+                    + "_"
+                    + seq_arr[i]
+                    for i in range(len(feature_name_ndarr))
+                ]
+            )
+
         mtx_ndarr = sps.csc_matrix(
             (
                 mtx_h5["matrix"]["data"][:],
@@ -121,35 +151,43 @@ class CellRangerOutput:
             ),
             shape=mtx_h5["matrix"]["shape"][:],
             dtype=np.int32,
-        ).toarray()
+        ).toarray()[fn_idx:]
 
         return (mtx_ndarr, feature_name_ndarr, barcode_ndarr)
 
-    def get_feature_matrix_as_df(self):
-        barcode_ndarr, feature_name_ndarr, mtx_ndarr = (
-            self.get_feature_matrix_as_ndarr()
-        )
-        tmp_dfs = []
+    # def get_feature_matrix_as_df(self):
+    #     barcode_ndarr, feature_name_ndarr, mtx_ndarr = (
+    #         self.get_feature_matrix_as_ndarr()
+    #     )
+    #     tmp_dfs = []
 
-        for i, feature_name in enumerate(feature_name_ndarr[:]):
-            tmp_df = pl.DataFrame(
-                {
-                    "feature_name": feature_name,
-                    "barcode": barcode_ndarr[:],
-                    "count": mtx_ndarr[i, :],
-                }
-            )
-            tmp_dfs.append(tmp_df)
+    #     for i, feature_name in enumerate(feature_name_ndarr[:]):
+    #         tmp_df = pl.DataFrame(
+    #             {
+    #                 "feature_name": feature_name,
+    #                 "barcode": barcode_ndarr[:],
+    #                 "count": mtx_ndarr[i, :],
+    #             }
+    #         )
+    #         tmp_dfs.append(tmp_df)
 
-        mtx_df = pl.concat(tmp_dfs, how="vertical")
+    #     mtx_df = pl.concat(tmp_dfs, how="vertical")
 
-        return mtx_df
+    #     return mtx_df
 
     def get_featbcmatrix_obj(self, name):
-        mtx, _, _ = self.get_feature_matrix_as_ndarr()
-        bc_df = self.get_feature_matrix_barcodes_as_df()
-        featname_df = self.get_feature_matrix_featnames_as_df()
-        return FeatBCMatrix(name, mtx, featname_df, bc_df)
+        mtx, feature_name_ndarr, barcode_ndarr = (
+            self.get_feature_matrix_as_ndarr()
+        )
+
+        return FeatBCMatrix(
+            name,
+            mtx,
+            pl.DataFrame(
+                {"feature_name": feature_name_ndarr}
+            ).with_row_index(),
+            pl.DataFrame({"barcode": barcode_ndarr}).with_row_index(),
+        )
 
 
 class FeatBCMatrix:

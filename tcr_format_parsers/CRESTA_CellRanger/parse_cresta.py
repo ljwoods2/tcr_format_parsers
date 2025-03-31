@@ -8,10 +8,15 @@ Overall steps:
     (or nucleotide sequences). we can also get the number of these clonotype
     cells in the overall proportion and the proportion relative to the entire cell pop
 
-    filtered_contig_annotations gives CELL barcode to clonotype id to cdr3_aa to entire sequenc
+    filtered_contig_annotations gives CELL barcode to clonotype id to cdr3_aa to entire sequence
 
-    -d /scratch/lwoods/10x/manuscript/30168neg
+    -d /scratch/lwoods/10x/10x_run_043/30107neg
 
+
+    -d /scratch/lwoods/10x/IM0144_10x/30168neg
+
+    --directories /tnorth_labs/Immunology/ekelley/10x/10x_run_043/30107pos
+    /tnorth_labs/Immunology/ekelley/10x/10x_run_043/30107pos/outs/per_sample_outs/30107pos
 
     may need conda-forge::gcc 
     conda install -c conda-forge libstdcxx-ng=12
@@ -41,19 +46,14 @@ from tcr_format_parsers.common.MHCCodeConverter import (
     DRA_NAME,
     DQA_FOR,
 )
-from tcr_format_parsers.common.TCRUtils import hash_tcr_sequence
-from tcr_format_parsers.CRESTA_CellRanger.CellRangerOutput import (
-    CellRangerOutput,
-    FeatBCMatrix,
-)
+from CellRangerOutput import CellRangerOutput, FeatBCMatrix
 import collections
 import itertools
-import tidytcells as tt
 
 # client = Client()
 
 
-def interpolate_chains(filt_annot_df):
+def interpolate_reads(filt_annot_df):
     """For two barcodes (cells) with a matching raw_clonotype_id and chain_code,
     ensure that each barcode is associated with the exact same set of chain_codes.
     i.e. if they match on one chain code, we insert rows so that they match on all of them
@@ -106,7 +106,7 @@ def interpolate_chains(filt_annot_df):
     return rawctid_bc_ccode_chain
 
 
-def cluster_clonotypes(bc_chaincode_chain):
+def cluster_clonotypes(bc_chaincode_chain, strict=False):
     """
     Reassign clonotypes based on hclustering that uses
     Fisher's exact test p-value as the distance metric
@@ -119,6 +119,9 @@ def cluster_clonotypes(bc_chaincode_chain):
     ----------
     bc_chaincode_chain : pl.LazyFrame
         A LazyFrame with columns "barcode", "chain_code", "chain"
+    strict : bool, optional
+        Whether to only keep clonotypes with exactly 1 alpha and 1 beta chain [[False]]
+
     """
     chaincode_bclist_bccount = bc_chaincode_chain.group_by("chain_code").agg(
         pl.col("barcode").alias("bc_list"),
@@ -195,6 +198,56 @@ def cluster_clonotypes(bc_chaincode_chain):
         )
         p_vals[p_val_idx] = p_val
 
+    # # tmp
+    # chaincodes_sorted = (
+    #     chaincode_bclist_bccount_filtered.select("chain_code")
+    #     .collect()
+    #     .to_series()
+    #     .to_list()
+    # )
+    # p_vals_mtx = squareform(p_vals)
+    # chain_1 = []
+    # chain_2 = []
+    # p_val_ls = []
+    # for i in range(n_unique_chains - 1):
+    #     for j in range(i + 1, n_unique_chains):
+    #         p_val = p_vals_mtx[i, j]
+    #         if p_val != 0 and p_val != 1:
+    #             chain1 = chaincodes_sorted[i]
+    #             chain2 = chaincodes_sorted[j]
+    #             chain_1.append(chain1)
+    #             chain_2.append(chain2)
+    #             p_val_ls.append(p_val)
+    # p_vals_df = pl.DataFrame(
+    #     {
+    #         "chain1": chain_1,
+    #         "chain2": chain_2,
+    #         "p_val": p_val_ls,
+    #     }
+    # )
+
+    # for i in range(len(bc_sets) - 1):
+    #     bc_set_1 = bc_sets[i]
+    #     bc_set_1_size = len(bc_set_1)
+    #     for j in range(i + 1, len(bc_sets)):
+    #         bc_set_2 = bc_sets[j]
+    #         bc_set_2_size = len(bc_set_2)
+
+    #         c1 = len(bc_set_1.intersection(bc_set_2))
+    #         c2 = bc_set_1_size - c1
+    #         c3 = bc_set_2_size - c1
+    #         c4 = n_cells - c1 - c2 - c3
+
+    #         _, p_val = fisher_exact([[c1, c2], [c3, c4]])
+
+    #         # https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.distance.squareform.html
+    #         p_val_idx = (
+    #             indexing_choose_constant
+    #             - indexing_choose_i_array[i]
+    #             + (j - i - 1)
+    #         )
+    #         p_vals[p_val_idx] = p_val
+
     z = linkage(p_vals, method="complete")
 
     # clusters is a length n_unique_chains array where each element is the cluster number
@@ -210,7 +263,7 @@ def cluster_clonotypes(bc_chaincode_chain):
     # assign clonotypes to barcodes
     # any chain that we didn't give a clonotype because it
     # only appeared in 1 cell
-    # is given a clonotype of pl.UInt32.max
+    # is given a clonotype of -1
     # so that it can be considered in finding doublets
     bc_chaincode_chain_outclonotype = bc_chaincode_chain.join(
         chaincode_bclist_bccount_outclonotype_filtered.select(
@@ -218,7 +271,7 @@ def cluster_clonotypes(bc_chaincode_chain):
         ),
         on=["chain_code"],
         how="left",
-    ).fill_null(pl.UInt32.max())
+    ).fill_null(-1)
 
     # find doublets- cells containing more than one clonotype
     doublet_bcs = (
@@ -228,7 +281,7 @@ def cluster_clonotypes(bc_chaincode_chain):
         .filter(pl.col("n_clonotypes") > 1)
     ).select("barcode")
 
-    # find singletons- cells containing only chains wtih clonotype pl.UInt32.max
+    # find singletons- cells containing only chains wtih clonotype -1
     # meaning those chains only appeared in that cell
     singleton_bcs = (
         (
@@ -247,54 +300,63 @@ def cluster_clonotypes(bc_chaincode_chain):
             on="barcode",
             how="inner",
         )
-        .filter(pl.col("out_clonotype") == pl.UInt32.max())
+        .filter(pl.col("out_clonotype") == -1)
         .select("barcode")
     )
+
+    # # find singletons- chains that only appear in one cell
+    # singleton_chaincodes = (
+    #     bc_chaincode_chain_newclonotype.select(["barcode", "chain_code"])
+    #     .group_by("chain_code")
+    #     .agg(pl.col("barcode").count().alias("n_barcodes"))
+    #     .filter(pl.col("n_barcodes") == 1)
+    # ).select("chain_code")
 
     # filter out singletons and doublets
     bc_chaincode_chain_outclonotype = bc_chaincode_chain_outclonotype.join(
         doublet_bcs, on="barcode", how="anti"
     ).join(singleton_bcs, on="barcode", how="anti")
 
-    # recombine TRA and TRB chains, filtering out clonotypes associated with >1 chain
+    # recombine TRA and TRB chains
     bc_tra_outclonotype = (
         bc_chaincode_chain_outclonotype.filter(pl.col("chain") == "TRA")
         .select(["barcode", "out_clonotype", "chain_code"])
         .rename({"chain_code": "TRA"})
     )
-
-    bc_tra_outclonotype = bc_tra_outclonotype.join(
-        bc_tra_outclonotype.select("out_clonotype", "TRA")
-        .unique()
-        .group_by("out_clonotype")
-        .agg(pl.col("TRA").count())
-        .filter(pl.col("TRA") == 1)
-        .select("out_clonotype"),
-        on="out_clonotype",
-        how="inner",
-    )
-
     bc_trb_outclonotype = (
         bc_chaincode_chain_outclonotype.filter(pl.col("chain") == "TRB")
         .select(["barcode", "out_clonotype", "chain_code"])
         .rename({"chain_code": "TRB"})
     )
 
-    bc_trb_outclonotype = bc_trb_outclonotype.join(
-        bc_trb_outclonotype.select("out_clonotype", "TRB")
-        .unique()
-        .group_by("out_clonotype")
-        .agg(pl.col("TRB").count())
-        .filter(pl.col("TRB") == 1)
-        .select("out_clonotype"),
-        on="out_clonotype",
-        how="inner",
-    )
-
-    bc_tra_trb_outclonotype = bc_tra_outclonotype.join(
-        bc_trb_outclonotype,
-        on=["barcode", "out_clonotype"],
-        how="inner",
+    # later, we will only care about barcode with both chains
+    # and exactly one of each
+    # keep this for now for validation
+    bc_tra_trb_outclonotype = pl.concat(
+        [
+            (
+                bc_tra_outclonotype.join(
+                    bc_trb_outclonotype,
+                    on=["barcode", "out_clonotype"],
+                    how="inner",
+                )
+            ),
+            # (
+            #     bc_tra_outclonotype.join(
+            #         bc_trb_outclonotype,
+            #         on=["barcode", "out_clonotype"],
+            #         how="anti",
+            #     )
+            # ),
+            # (
+            #     bc_trb_outclonotype.join(
+            #         bc_tra_outclonotype,
+            #         on=["barcode", "out_clonotype"],
+            #         how="anti",
+            #     )
+            # ),
+        ],
+        how="diagonal",
     )
 
     # count number of cells per clonotype
@@ -334,146 +396,150 @@ def cluster_clonotypes(bc_chaincode_chain):
         .select(["barcode", "TRA", "TRB", "new_clonotype"])
         .rename({"new_clonotype": "clonotype_id"})
     )
+    # outclonotype_newclonotype_frequency = (
+    #     outclonotype_newclonotype_frequency.sort(
+    #         "clonotype_frequency", descending=True
+    #     )
+    # )
+    # outclonotype_newclonotype_frequency = (
+    #     outclonotype_newclonotype_frequency.with_columns(
+    #         pl.Series(
+    #             "new_clonotype",
+    #             np.arange(
+    #                 outclonotype_newclonotype_frequency.collect().height,
+    #                 dtype=np.int32,
+    #             ),
+    #         ),
+    #     )
+    # )
 
+    # chaincode_newclonotype_frequency_filtered = (
+    #     chaincode_bclist_bccount_outclonotype_filtered.select(
+    #         ["chain_code", "out_clonotype"]
+    #     ).join(
+    #         outclonotype_newclonotype_frequency,
+    #         on="out_clonotype",
+    #         how="inner",
+    #     )
+    # )
+
+    # chaincode_newclonotype_frequency_filtered.drop("out_clonotype")
+
+    # filter out clonotypes which have != 1 alpha or != 1 beta TCR chain
+    # clonotypes_1_alpha = (
+    #     bc_chaincode_chain_outclonotype.filter(pl.col("chain") == "TRA")
+    #     .select(["chain_code", "new_clonotype"])
+    #     .group_by("new_clonotype")
+    #     .agg([pl.col("chain_code").count().alias("count")])
+    #     .filter(pl.col("count") == 1)
+    #     .select("new_clonotype")
+    # )
+
+    # clonotypes_1_beta = (
+    #     bc_chaincode_chain_outclonotype.filter(pl.col("chain") == "TRB")
+    #     .select(["chain_code", "new_clonotype"])
+    #     .group_by("new_clonotype")
+    #     .agg([pl.col("chain_code").count().alias("count")])
+    #     .filter(pl.col("count") == 1)
+    #     .select("new_clonotype")
+    # )
+
+    # bc_chaincode_chain_outclonotype = bc_chaincode_chain_outclonotype.join(
+    #     clonotypes_1_alpha, on="new_clonotype", how="inner"
+    # ).join(clonotypes_1_beta, on="new_clonotype", how="inner")
+
+    # bc_newclonotype_tra = (
+    #     bc_chaincode_chain_outclonotype.filter(pl.col("chain") == "TRA")
+    #     .select(["barcode", "new_clonotype", "chain_code"])
+    #     .rename({"chain_code": "TRA"})
+    # )
+    # bc_newclonotype_trb = (
+    #     bc_chaincode_chain_outclonotype.filter(pl.col("chain") == "TRB")
+    #     .select(["barcode", "new_clonotype", "chain_code"])
+    #     .rename({"chain_code": "TRB"})
+    # )
+
+    # bc_tra_trb_clonotypeid = bc_newclonotype_tra.join(
+    #     bc_newclonotype_trb, on=["barcode", "new_clonotype"], how="inner"
+    # ).rename({"new_clonotype": "clonotype_id"})
     return bc_tra_trb_clonotypeid, clonotypeid_frequency
 
 
-def compute_filt_mtx(cro_list):
+""""
+Ps[indecestotest]=lapply(Ctables[indecestotest],function(X) fisher.test(X)$p.value)
+Pmat=matrix(Ps,nrow=length)
+clusteredobject=hclust(as.dist(Pmat))
+groups=cutree(clusteredobject,h=1e-6)
+"""
 
-    tmp_dfs = []
-    withvdj_norm_matrices = []
-    withvdj_matrices = []
-    filt_annot_dfs = []
-    featnames_idx_df = None
-    offset = 0
 
-    for cro in cro_list:
-        filt_annot_df = cro.get_filtered_contig_df()
+def construct_cognate_df(cro):
 
-        # May have uneccesary logic here- doesn't hurt
-        filt_annot_df = filt_annot_df.filter(
-            (~pl.col("raw_clonotype_id").is_in(["None", ""]))
-            & (pl.col("productive") == "true")
-            & (~pl.col("raw_consensus_id").is_in(["None", ""])),
-        )
+    filt_annot_df = cro.get_filtered_contig_df()
 
-        # Create a TRA/B chain_code column
-        filt_annot_df = filt_annot_df.with_columns(
-            pl.concat_str(
-                ["v_gene", "cdr3", "j_gene", "cdr3_nt"],
-                separator=":",
-            ).alias("chain_code")
-        )
-
-        # can remove later- just rename filt_annot_df to rawctid_...
-        rawctid_bc_chaincode_chain = interpolate_chains(filt_annot_df)
-
-        # Barcode, TRA, TRB
-        bc_chaincode_chain_alpha = (
-            rawctid_bc_chaincode_chain.filter(pl.col("chain") == "TRA").select(
-                ["barcode", "chain_code", "chain"]
-            )
-        ).unique()
-        bc_chaincode_chain_beta = (
-            rawctid_bc_chaincode_chain.filter(pl.col("chain") == "TRB").select(
-                ["barcode", "chain_code", "chain"]
-            )
-        ).unique()
-
-        # all barcodes that contain VDJ evidence
-        # we only care about the barcodes for which
-        # we have feature counts & VDJ annot
-
-        bc_chaincode_chain_with_vdj = pl.concat(
-            [bc_chaincode_chain_alpha, bc_chaincode_chain_beta], how="vertical"
-        )
-
-        # remove barcodes without VDJ annotations from norm mtx
-        original_matrix = cro.get_featbcmatrix_obj("orig")
-
-        withvdj_matrix = original_matrix.create_child_matrix(
-            "withvdj",
-            bc_df=bc_chaincode_chain_with_vdj.select("barcode")
-            .unique()
-            .collect(),
-        )
-
-        # These index dfs should be the same across runs
-        if featnames_idx_df is None:
-            featnames_idx_df = withvdj_matrix.featnames_idx_df
-
-        # then normalize feature counts
-        withvdj_norm_matrix = FeatBCMatrix(
-            "withvdj_norm",
-            normalize_feature_counts(withvdj_matrix),
-            withvdj_matrix.featnames_idx_df.rename(
-                {withvdj_matrix.idx_name: "withvdj_norm_idx"}
-            ),
-            withvdj_matrix.bc_idx_df.rename(
-                {withvdj_matrix.idx_name: "withvdj_norm_idx"},
-            ),
-        )
-
-        # only reclonotype rows with feature counts and vdj annot
-        # replace barcode with unique integer
-        # that doubles as index into concatenated np array
-        bc_chaincode_chain_idx = (
-            withvdj_matrix.bc_idx_df.lazy()
-            .join(bc_chaincode_chain_with_vdj, on="barcode", how="inner")
-            .select("barcode", "withvdj_idx", "chain_code", "chain")
-        ).with_columns((pl.col("withvdj_idx") + offset).alias("withvdj_idx"))
-
-        filt_annot_df = (
-            filt_annot_df.join(
-                bc_chaincode_chain_idx.select("barcode", "withvdj_idx"),
-                on="barcode",
-                how="inner",
-            )
-            .select(pl.exclude("barcode"))
-            .with_columns(pl.col("withvdj_idx").alias("barcode"))
-            .select(pl.exclude("withvdj_idx"))
-        )
-
-        bc_chaincode_chain = (
-            bc_chaincode_chain_idx.select(pl.exclude("barcode"))
-            .with_columns(pl.col("withvdj_idx").alias("barcode"))
-            .select(pl.exclude("withvdj_idx"))
-        )
-
-        filt_annot_dfs.append(filt_annot_df)
-        withvdj_matrices.append(withvdj_matrix)
-        withvdj_norm_matrices.append(withvdj_norm_matrix)
-        tmp_dfs.append(bc_chaincode_chain)
-
-        offset += withvdj_matrix.mtx.shape[1]
-
-    # master filt_annot_df
-    filt_annot_df = pl.concat(filt_annot_dfs, how="vertical")
-
-    # combine withvdj/withvdjnorm matrices
-    withvdj_matrix_ndarr = np.concatenate(
-        [fbcm.mtx for fbcm in withvdj_matrices]
-    )
-    withvdj_norm_matrix_ndarr = np.concatenate(
-        [fbcm.mtx for fbcm in withvdj_norm_matrices]
+    # May have uneccesary logic here- doesn't hurt
+    filt_annot_df = filt_annot_df.filter(
+        (~pl.col("raw_clonotype_id").is_in(["None", ""]))
+        & (pl.col("productive") == "true")
+        & (~pl.col("raw_consensus_id").is_in(["None", ""])),
     )
 
-    bc_chaincode_chain = pl.concat(tmp_dfs, how="vertical")
-    bc_idx_df = (
-        bc_chaincode_chain.select("barcode")
-        .with_columns(pl.col("barcode").alias("withvdj_idx"))
-        .collect()
+    # Create a TRA/B chain_code column
+    filt_annot_df = filt_annot_df.with_columns(
+        pl.concat_str(
+            ["v_gene", "cdr3", "j_gene", "cdr3_nt"],
+            separator=":",
+        ).alias("chain_code")
     )
 
-    withvdj_matrix = FeatBCMatrix(
-        "withvdj", withvdj_matrix_ndarr, featnames_idx_df, bc_idx_df
+    # can remove later- just rename filt_annot_df to rawctid_...
+    rawctid_bc_chaincode_chain = interpolate_reads(filt_annot_df)
+
+    # Barcode, TRA, TRB
+    bc_chaincode_chain_alpha = (
+        rawctid_bc_chaincode_chain.filter(pl.col("chain") == "TRA").select(
+            ["barcode", "chain_code", "chain"]
+        )
+    ).unique()
+    bc_chaincode_chain_beta = (
+        rawctid_bc_chaincode_chain.filter(pl.col("chain") == "TRB").select(
+            ["barcode", "chain_code", "chain"]
+        )
+    ).unique()
+
+    # all barcodes that contain VDJ evidence
+    # we only care about the barcodes for which
+    # we have feature counts & VDJ annot
+
+    bc_chaincode_chain_with_vdj = pl.concat(
+        [bc_chaincode_chain_alpha, bc_chaincode_chain_beta], how="vertical"
     )
 
+    # remove barcodes without VDJ annotations from mtx
+    original_matrix = cro.get_featbcmatrix_obj("orig")
+
+    withvdj_matrix = original_matrix.create_child_matrix(
+        "withvdj",
+        bc_df=bc_chaincode_chain_with_vdj.select("barcode").unique().collect(),
+    )
+
+    # then normalize feature counts
     withvdj_norm_matrix = FeatBCMatrix(
         "withvdj_norm",
-        withvdj_norm_matrix_ndarr,
-        featnames_idx_df.rename({"withvdj_idx": "withvdj_norm_idx"}),
-        bc_idx_df.rename({"withvdj_idx": "withvdj_norm_idx"}),
+        normalize_feature_counts(withvdj_matrix),
+        withvdj_matrix.featnames_idx_df.rename(
+            {withvdj_matrix.idx_name: "withvdj_norm_idx"}
+        ),
+        withvdj_matrix.bc_idx_df.rename(
+            {withvdj_matrix.idx_name: "withvdj_norm_idx"},
+        ),
+    )
+
+    # only reclonotype rows with feature counts and vdj annot
+    bc_chaincode_chain_with_feat_vdj = (
+        original_matrix.bc_idx_df.lazy()
+        .select("barcode")
+        .join(bc_chaincode_chain_with_vdj, on="barcode", how="inner")
     )
 
     # CellRanger known limitation is that when 1 cell contains
@@ -482,7 +548,7 @@ def compute_filt_mtx(cro_list):
     # be called as the same clonotype. This algorithm
     # will reassign clonotypes based on Fisher's exact test
     bc_tra_trb_clonotypeid, clonotypeid_frequency = cluster_clonotypes(
-        bc_chaincode_chain
+        bc_chaincode_chain_with_feat_vdj, strict=False
     )
 
     # filter out clonotypes by frequency
@@ -498,12 +564,12 @@ def compute_filt_mtx(cro_list):
         .collect()
     )
 
-    # find mhcs with a max count >=2 in the unnormalized data
-    feature_maxes = np.max(withvdj_matrix.mtx, axis=1)
+    # find mhcs with a count >=2 in the unnormalized data
+    feature_maxes = np.max(original_matrix.mtx, axis=1)
     feature_indices = np.where(feature_maxes >= 2)[0]
     fname_df = pl.DataFrame(
         {
-            "feature_name": withvdj_matrix.get_featnames_ndarr()[
+            "feature_name": original_matrix.get_featnames_ndarr()[
                 feature_indices
             ],
         }
@@ -516,33 +582,10 @@ def compute_filt_mtx(cro_list):
         featnames_df=fname_df,
     )
 
-    return (withvdjfilt_matrix, withvdj_norm_matrix, filt_annot_df)
-
-
-def construct_cognate_df(
-    cro_list,
-    focal_p_thresh,
-    focal_fold_thresh,
-    bind_p_thresh,
-    bind_fold_thresh,
-):
-
-    withvdjfilt_matrix, withvdj_norm_matrix, filt_annot_df = compute_filt_mtx(
-        cro_list
-    )
-
     # child matx of withvdj_norm with only 'filt' barcodes and focal features
 
-    fname_pval_fchange = compute_pval_foldchange(
+    focalfeatnames = get_focal_features(
         withvdjfilt_matrix,
-    )
-
-    focalfeatnames = fname_pval_fchange.filter(
-        ((pl.col("p_val").log(base=10) * -1) > focal_p_thresh)
-        & (
-            (pl.col("fold_change").log(base=2) > focal_fold_thresh)
-            | (pl.col("fold_change").log(base=2) < (-1 * focal_fold_thresh))
-        )
     )
 
     bc_ctypeid_filt = withvdjfilt_matrix.bc_idx_df.select(
@@ -558,125 +601,123 @@ def construct_cognate_df(
 
     ctypeid_featname = find_binding_features_and_clonotypes(
         cognate_matrix,
-        bind_p_thresh,
-        bind_fold_thresh,
     )
 
-    featname_mhc1_mhc2_peptide_ctypeid = extract_cresta_peptide_mhc_seqs(
+    featname_hlaa_hlab_peptide_ctypeid = extract_cresta_peptide_mhc_seqs(
         ctypeid_featname.select("feature_name").unique(),
     ).join(ctypeid_featname, on="feature_name", how="inner")
 
-    mhc1 = featname_mhc1_mhc2_peptide_ctypeid.select(
-        ["mhc_1_seq", "mhc_1_name", "mhc_1_type"]
+    hlaaseq_hlaaname = featname_hlaa_hlab_peptide_ctypeid.select(
+        ["hla_a_seq", "hla_a_name"]
     ).unique()
 
-    mhc2 = featname_mhc1_mhc2_peptide_ctypeid.select(
-        ["mhc_2_seq", "mhc_2_name", "mhc_2_type"]
+    hlabseq_hlabname = featname_hlaa_hlab_peptide_ctypeid.select(
+        ["hla_b_seq", "hla_b_name"]
     ).unique()
 
     # if two hla,hlb,peptide rows are considered matching (if they have overlapping peptides)
     # then we combine them into one row, which we consider to bind with the superset
     # of the peptides that the two rows bind with
-    featname_mhc1_mhc2_peptide_ctypeid = (
-        combine_features(featname_mhc1_mhc2_peptide_ctypeid)
-        .join(mhc1, on="mhc_1_name", how="inner")
-        .join(mhc2, on="mhc_2_name", how="inner")
+    featname_hlaa_hlab_peptide_ctypeid = (
+        combine_features(featname_hlaa_hlab_peptide_ctypeid)
+        .join(hlaaseq_hlaaname, on="hla_a_name", how="inner")
+        .join(hlabseq_hlabname, on="hla_b_name", how="inner")
     )
 
-    ctypeid_mhc1_mhc2_peptide = featname_mhc1_mhc2_peptide_ctypeid.select(
+    ctypeid_hlaa_hlab_peptide = featname_hlaa_hlab_peptide_ctypeid.select(
         [
             "clonotype_id",
-            "mhc_1_seq",
-            "mhc_1_name",
-            "mhc_1_type",
-            "mhc_2_seq",
-            "mhc_2_name",
-            "mhc_2_type",
+            "hla_a_seq",
+            "hla_a_name",
+            "hla_b_seq",
+            "hla_b_name",
             "peptide",
         ]
     ).unique()
 
-    # for now, if two barcodes contain the same chain_code, we consider them to
-    # have the same ACTUAL CHAIN, which is not true- their FWR or CDR1/2 regions can differ
-    # (though this is rare)
-    ctypeid_tcrseq_chain = (
+    # bc, ctypeid, chain sequence
+    bc_ctypeid_tcrseq_chain = (
         filt_annot_df.join(bc_ctypeid_filt.lazy(), on="barcode", how="inner")
         .with_columns(
             pl.concat_str(
                 ["fwr1", "cdr1", "fwr2", "cdr2", "fwr3", "cdr3", "fwr4"],
             ).alias("tcr_seq")
         )
-        .select(
-            "clonotype_id", "tcr_seq", "v_gene", "j_gene", "cdr3_nt", "chain"
-        )
-        .group_by("v_gene", "j_gene", "cdr3_nt", "clonotype_id", "chain")
-        .agg(pl.col("tcr_seq").first())
-        .select("clonotype_id", "tcr_seq", "chain")
+        .select(["barcode", "clonotype_id", "chain", "tcr_seq"])
     )
     # this only makes sense if we only allow clonotypes with exactly 1
     # alpha and 1 beta and filter out singletons + doublets
-    ctypeid_tcr1 = (
-        ctypeid_tcrseq_chain.filter(pl.col("chain") == "TRA")
-        .select("clonotype_id", "tcr_seq")
-        .rename({"tcr_seq": "tcr_1_seq"})
+    bc_cltypeid_tcra_tcrb = (
+        bc_tra_trb_clonotypeid.join(
+            bc_ctypeid_tcrseq_chain.filter(pl.col("chain") == "TRA"),
+            on="barcode",
+            how="inner",
+        )
+        .rename({"tcr_seq": "tcr_alpha_seq"})
+        .join(
+            bc_ctypeid_tcrseq_chain.filter(pl.col("chain") == "TRB"),
+            on="barcode",
+            how="inner",
+        )
+        .rename({"tcr_seq": "tcr_beta_seq"})
+        .select("barcode", "clonotype_id", "tcr_alpha_seq", "tcr_beta_seq")
     )
 
-    ctypeid_tcr2 = (
-        ctypeid_tcrseq_chain.filter(pl.col("chain") == "TRB")
-        .select("clonotype_id", "tcr_seq")
-        .rename({"tcr_seq": "tcr_2_seq"})
-    )
-
-    # this should be a strict subset of bc_tra_trb_clonotypeid
-    ctypeid_tcra_tcrb = ctypeid_tcr1.join(
-        ctypeid_tcr2, on="clonotype_id", how="inner"
-    )
-
-    tcr1_tcr1_mhc1_mhc2_peptide = (
+    tcra_tcrb_hlaa_hlab_peptide = (
         (
-            ctypeid_tcra_tcrb.join(
-                ctypeid_mhc1_mhc2_peptide.lazy(),
+            bc_cltypeid_tcra_tcrb.select(
+                ["clonotype_id", "tcr_alpha_seq", "tcr_beta_seq"]
+            )
+            .unique()
+            .join(
+                ctypeid_hlaa_hlab_peptide.lazy(),
                 on="clonotype_id",
                 how="inner",
             )
         )
         .select(
-            "tcr_1_seq",
-            "tcr_2_seq",
-            "mhc_1_seq",
-            "mhc_1_name",
-            "mhc_1_type",
-            "mhc_2_seq",
-            "mhc_2_name",
-            "mhc_2_type",
+            "tcr_alpha_seq",
+            "tcr_beta_seq",
+            "hla_a_seq",
+            "hla_a_name",
+            "hla_b_seq",
+            "hla_b_name",
             "peptide",
         )
-        .with_columns(
-            pl.lit("tcr_alpha").alias("tcr_1_type"),
-            pl.lit("tcr_beta").alias("tcr_2_type"),
-            pl.col("tcr_1_seq")
-            .map_elements(
-                lambda x: hash_tcr_sequence(x, "md5"), return_dtype=pl.String
-            )
-            .alias("tcr_1_name"),
-            pl.col("tcr_2_seq")
-            .map_elements(
-                lambda x: hash_tcr_sequence(x, "md5"), return_dtype=pl.String
-            )
-            .alias("tcr_2_name"),
+        .rename(
+            {
+                "tcr_alpha_seq": "tcr_1_seq",
+                "tcr_beta_seq": "tcr_2_seq",
+                "hla_a_seq": "mhc_1_seq",
+                "hla_a_name": "mhc_1_name",
+                "hla_b_seq": "mhc_2_seq",
+                "hla_b_name": "mhc_2_name",
+            }
         )
     )
 
-    return tcr1_tcr1_mhc1_mhc2_peptide
+    return tcra_tcrb_hlaa_hlab_peptide
+
+    # join with clonotype_id featurename pairings
+    # bc_cltypeid_tcra_tcrb_hlaa_hlab_peptide = bc_cltypeid_tcra_tcrb.join(
+    #     ctypeid_hlaa_hlab_peptide,
+    #     on="clonotype_id",
+    #     how="inner",
+    # )
 
 
-def combine_features(featname_mhc1_mhc2_peptide_ctypeid, overlap_thresh=9):
+def combine_features(featname_hlaa_hlab_peptide_ctypeid, overlap_thresh=9):
+    # to make this method deterministic, sort input dataframe by
+    # feature name
+    # featname_hlaa_hlab_peptide = featname_hlaaseq_hlabseq_peptide.sort(
+    #     by="feature_name"
+    # )
 
-    mhc1name_mhc2name_plist = (
-        featname_mhc1_mhc2_peptide_ctypeid.select(
-            ["mhc_1_name", "mhc_2_name", "peptide"]
+    hlaaname_hlabname_plist = (
+        featname_hlaa_hlab_peptide_ctypeid.select(
+            ["hla_a_name", "hla_b_name", "peptide"]
         )
-        .group_by(["mhc_1_name", "mhc_2_name"])
+        .group_by(["hla_a_name", "hla_b_name"])
         .agg(
             [
                 pl.col("peptide").alias("peptide_list"),
@@ -684,9 +725,9 @@ def combine_features(featname_mhc1_mhc2_peptide_ctypeid, overlap_thresh=9):
         )
     )
 
-    hla_a_names = mhc1name_mhc2name_plist.select("mhc_1_name").to_series()
-    hla_b_names = mhc1name_mhc2name_plist.select("mhc_2_name").to_series()
-    peptide_lists = mhc1name_mhc2name_plist.select("peptide_list").to_series()
+    hla_a_names = hlaaname_hlabname_plist.select("hla_a_name").to_series()
+    hla_b_names = hlaaname_hlabname_plist.select("hla_b_name").to_series()
+    peptide_lists = hlaaname_hlabname_plist.select("peptide_list").to_series()
 
     collapse_hla_bs = []
     collapse_hla_as = []
@@ -706,7 +747,7 @@ def combine_features(featname_mhc1_mhc2_peptide_ctypeid, overlap_thresh=9):
         #     # collapse_ctypids.append(clonotype_id_list[0].to_list())
         #     continue
 
-        # all_peptides = set(p for p in peptide_list)
+        all_peptides = set(p for p in peptide_list)
 
         match_dict = dict(
             (peptide, set([peptide])) for peptide in peptide_list
@@ -736,6 +777,46 @@ def combine_features(featname_mhc1_mhc2_peptide_ctypeid, overlap_thresh=9):
 
         match_dict = merge_keys(match_dict)
 
+        # # is this match a substring of a match we already found or vice versa?
+        # delete = set()
+        # add = []
+        # substring = False
+        # for key in match_dict.keys():
+        #     if (
+        #         overlap in key or key in overlap
+        #     ) and key not in delete:
+        #         substring = True
+        #         if overlap_len >= len(key):
+        #             match_dict[key].update([peptide_1, peptide_2])
+        #         else:
+        #             delete.add(key)
+        #             add.append((overlap, [j, k, *match_dict[key]]))
+
+        # for key in delete:
+        #     del match_dict[key]
+
+        # for shorter, indices in add:
+        #     match_dict[shorter].update(indices)
+
+        # # if it's not, just add it
+        # if not substring:
+        #     match_dict[overlap].update([j, k])
+
+        # # we also keep a row if there are no matches for it
+        # if no_match:
+        #     collapse_hla_bs.append(hla_b)
+        #     collapse_hla_as.append(hla_a)
+        #     collapse_peptides.append(peptide_1)
+        #     collapse_ctypids.append(clonotype_id_list[j].to_list())
+        # remaining_peptides = list(all_peptides)
+        # for l in remaining_peptides:
+        #     collapse_hla_as.append(hla_a)
+        #     collapse_hla_bs.append(hla_b)
+        #     collapse_peptides.append(peptide_list[l])
+        #     collapse_ctypids.append(
+        #         np.array(clonotype_id_list[l].to_list(), dtype=np.int32)
+        #     )
+
         # if the indices of any two keys overlap, raise an error
         # this means that A and B overlap and B and C overlap
         # but A and C do not overlap for some A, B, C peptides
@@ -753,9 +834,9 @@ def combine_features(featname_mhc1_mhc2_peptide_ctypeid, overlap_thresh=9):
             seen.update(v)
             keep = min(v)
             superset_ctypeids = (
-                featname_mhc1_mhc2_peptide_ctypeid.filter(
-                    (pl.col("mhc_1_name") == hla_a)
-                    & (pl.col("mhc_2_name") == hla_b)
+                featname_hlaa_hlab_peptide_ctypeid.filter(
+                    (pl.col("hla_a_name") == hla_a)
+                    & (pl.col("hla_b_name") == hla_b)
                     & (pl.col("peptide").is_in(v))
                 )
                 .select("peptide", "clonotype_id")
@@ -769,39 +850,42 @@ def combine_features(featname_mhc1_mhc2_peptide_ctypeid, overlap_thresh=9):
                 .to_series()
                 .to_list()
             )
-            # ensure peptides all share at least one clonotype
-            # else raise an error as it doesn't make sense to merge them
-            tmp = set(superset_ctypeids[0])
-            for i in range(1, len(superset_ctypeids)):
-                if len(tmp.intersection(set(superset_ctypeids[i]))) == 0:
-                    raise ValueError(
-                        f"Peptides {v[0]} and {v[i]} do not share any clonotypes"
-                    )
+            # ensure each peptide shares at least one clonotype
+            # else raise an error
+            # tmp = set(superset_ctypeids[0])
+            # for i in range(1, len(superset_ctypeids)):
+            #     if len(tmp.intersection(set(superset_ctypeids[i]))) == 0:
+            #         raise ValueError(
+            #             f"Peptides {v[0]} and {v[i]} do not share any clonotypes"
+            #         )
+            # superset_ctypeids = [].extend(
+            #     ctypeids for ctypeids in superset_ctypeids
+            # )
             superset_ctypeids = [x for xs in superset_ctypeids for x in xs]
 
             collapse_hla_bs.append(hla_b)
             collapse_hla_as.append(hla_a)
             collapse_peptides.append(keep)
             collapse_ctypids.append(
-                np.array(superset_ctypeids, dtype=np.int32)
+                np.array(list(superset_ctypeids), dtype=np.int32)
             )
 
-    mhc1_mhc2_peptide_ctypids = pl.DataFrame(
+    hlaaseq_hlabseq_peptide_ctypids = pl.DataFrame(
         {
-            "mhc_1_name": collapse_hla_as,
-            "mhc_2_name": collapse_hla_bs,
+            "hla_a_name": collapse_hla_as,
+            "hla_b_name": collapse_hla_bs,
             "peptide": collapse_peptides,
             "clonotype_id": collapse_ctypids,
         }
     )
 
-    mhc1_mhc2_peptide_ctypid = mhc1_mhc2_peptide_ctypids.explode(
+    hlaaseq_hlabseq_peptide_ctypid = hlaaseq_hlabseq_peptide_ctypids.explode(
         "clonotype_id"
     )
-    return mhc1_mhc2_peptide_ctypid
+    return hlaaseq_hlabseq_peptide_ctypid
 
 
-def compute_pval_foldchange(
+def get_focal_features(
     featbc_mtx,
 ):
 
@@ -826,16 +910,9 @@ def compute_pval_foldchange(
             .group_by("clonotype_id")
             .agg([pl.col("read_count").alias("read_count_list")])
         )
-
-        try:
-            pvalue = kruskal(
-                *clonotype_rc_list.select("read_count_list")
-                .to_series()
-                .to_list()
-            ).pvalue
-        except:
-            pass
-
+        pvalue = kruskal(
+            *clonotype_rc_list.select("read_count_list").to_series().to_list()
+        ).pvalue
         if pvalue == 0.0:
             pvalue = 1e-250
 
@@ -855,10 +932,19 @@ def compute_pval_foldchange(
             "feature_name": feature_name_ndarr,
             "p_val": p_vals,
             "fold_change": fold_changes,
+            # "index": fname_idx_ndarr,
         }
     )
 
-    return fname_pval_fchange
+    focalfnames = fname_pval_fchange.filter(
+        ((pl.col("p_val").log(base=10) * -1) > 10)
+        & (
+            (pl.col("fold_change").log(base=2) > 0.3)
+            | (pl.col("fold_change").log(base=2) < -0.3)
+        )
+    ).select("feature_name")
+
+    return focalfnames
 
 
 def normalize_feature_counts(featbc_mtx):
@@ -881,35 +967,15 @@ def normalize_feature_counts(featbc_mtx):
     )
 
     # Per-cell norm
-    # mtx_median_norm = np.empty(mtx_ndarr.shape)
+    mtx_median_norm = np.empty(mtx_ndarr.shape)
 
-    # row_arange = np.arange(0, n_features)
-    # for i in range(n_features):
-    #     # exclude the current row in calculating the col-wise medians
-    #     col_wise_medians = np.median(
-    #         mtx_ndarr[row_arange[row_arange != i]], axis=0
-    #     )
-    #     mtx_median_norm[i] = mtx_ndarr[i] / col_wise_medians
-
-    # TESTME with 30168
-    col_wise_medians = np.median(mtx_ndarr, axis=0)
-    mtx_median_norm = mtx_ndarr / col_wise_medians
-
-    # colmasked = np.empty((n_features - 1), dtype=np.float32)
-    # for i in range(n_barcodes):
-    #     curr_col = mtx_ndarr[:, i]
-    #     sorted_idx = np.argsort(curr_col)
-    #     sorted_col = curr_col[sorted_idx]
-    #     medians = np.empty((n_features,), dtype=np.float32)
-
-    #     for j in range(n_features):
-    #         colmasked = sorted_col[row_arange != j]
-    #         n = n_features - 1
-    #         medians[j] = np.mean(colmasked[(n - 1) // 2 : (n // 2) + 1])
-
-    #     medians = sorted_col / medians
-    #     new_col = medians[np.sort(sorted_idx)]
-    #     mtx_ndarr[:, i] = new_col[:]
+    row_arange = np.arange(0, n_features)
+    for i in range(n_features):
+        # exclude the current row in calculating the col-wise medians
+        col_wise_medians = np.median(
+            mtx_ndarr[row_arange[row_arange != i]], axis=0
+        )
+        mtx_median_norm[i] = mtx_ndarr[i] / col_wise_medians
 
     # Apply a ceiling
     # parameterize later if needed
@@ -935,9 +1001,19 @@ def normalize_feature_counts(featbc_mtx):
     return mtx_norm
 
 
-def find_binding_features_and_clonotypes(
-    featbc_mtx, bind_p_thresh, bind_fold_thresh
-):
+def find_binding_features_and_clonotypes(featbc_mtx):
+
+    # bc_preidx_postidx_clonotypeid = bc_preidx_postidx_clonotypeid.sort(
+    #     by="post_idx"
+    # ).with_row_index(
+    #     name="clonotyped_idx",
+    # )
+    # bc_postidx_ndarr = (
+    #     bc_preidx_postidx_clonotypeid.select("post_idx").to_series().to_numpy()
+    # )
+
+    # mtx_norm_clonotyped = mtx_norm_with_vdj[:, bc_postidx_ndarr]
+
     # find_binding_features_and_clonotypes
     clonotype_cltypeidxls = (
         featbc_mtx.bc_idx_df.select(["clonotype_id", featbc_mtx.idx_name])
@@ -948,6 +1024,7 @@ def find_binding_features_and_clonotypes(
     cltypeidx_lists = clonotype_cltypeidxls.select("index_list").to_series()
 
     # for each feature, find the range
+    # feature_idxs = focalfnames_idx.select("index").to_series()
     feature_names = featbc_mtx.get_featnames_ndarr()
 
     # idxs of 40th and 60th percentile in sorted array's 2nd dimension
@@ -994,8 +1071,8 @@ def find_binding_features_and_clonotypes(
 
     clonotypeid_fname_pval_fchange = pl.concat(tmp_dfs, how="vertical")
     clonotypeid_fname_binding = clonotypeid_fname_pval_fchange.filter(
-        ((pl.col("p_val").log(base=10) * -1) > bind_p_thresh)
-        & (pl.col("fold_change").log(base=2) > bind_fold_thresh)
+        ((pl.col("p_val").log(base=10) * -1) > 2.5)
+        & (pl.col("fold_change").log(base=2) > 1.25)
     ).select(["clonotype_id", "feature_name"])
 
     return clonotypeid_fname_binding
@@ -1015,7 +1092,7 @@ def extract_cresta_peptide_mhc_seqs(featname):
             pl.col("feature_name")
             .str.split_exact("_", 3)
             .struct.rename_fields(
-                ["deleteme", "fbc_id", "mhc_code", "peptide"]
+                ["deleteme", "fbc_id", "hla_code", "peptide"]
             )
             .alias("struct")
         )
@@ -1026,33 +1103,25 @@ def extract_cresta_peptide_mhc_seqs(featname):
     )
 
     # convert from fbc to official format
-    mhc_codes = (
-        featname_hlacode_peptide.select("mhc_code").to_series().to_list()
+    hla_codes = (
+        featname_hlacode_peptide.select("hla_code").to_series().to_list()
     )
     beta_seqs = []
     beta_names = []
-    beta_types = []
     alpha_seqs = []
     alpha_names = []
-    alpha_types = []
     mhc_converter = HLACodeWebConverter()
 
     # convert MHC code to transmembrane-removed AA sequence
-    for mhc_code in mhc_codes:
-        if mhc_code in KNOWN_FEATNAMES:
-            officialname = KNOWN_FEATNAMES[mhc_code]
+    for hla_code in hla_codes:
+        if hla_code in KNOWN_FEATNAMES:
+            officialname = KNOWN_FEATNAMES[hla_code]
         else:
-            # standardize is fine here since we guaranteed a fully-qualified name
-            # in cresta
-            officialname = tt.mh.standardize(
-                mhc_code, precision="allele"
-            ).split("HLA-")[1]
-
-            # gene = hla_code[:4]
-            # allele_group = hla_code[4:6]
-            # # ignore synonymous mutations
-            # allele = hla_code[6:].split(":")[0]
-            # officialname = gene + "*" + allele_group + ":" + allele
+            gene = hla_code[:4]
+            allele_group = hla_code[4:6]
+            # ignore synonymous mutations
+            allele = hla_code[6:].split(":")[0]
+            officialname = gene + "*" + allele_group + ":" + allele
 
         seq = mhc_converter.get_sequence(officialname, top_only=True)
         beta_seq = None
@@ -1062,42 +1131,90 @@ def extract_cresta_peptide_mhc_seqs(featname):
 
             alpha_seq = DRA_EXTRACELLULAR_TOPOLOGICAL_SEQ
             alpha_name = DRA_NAME
-            alpha_type = "hla_II_alpha"
             beta_seq = seq
             beta_name = officialname
-            beta_type = "hla_II_beta"
 
         elif officialname.startswith("DQB"):
             alpha_seq = mhc_converter.get_sequence(
                 DQA_FOR[officialname], top_only=True
             )
             alpha_name = DQA_FOR[officialname]
-            alpha_type = "hla_II_alpha"
             beta_seq = seq
             beta_name = officialname
-            beta_type = "hla_II_beta"
         else:
             raise ValueError(f"Unexpected HLA gene {officialname}")
 
         beta_seqs.append(beta_seq)
         beta_names.append(beta_name)
-        beta_types.append(beta_type)
         alpha_seqs.append(alpha_seq)
         alpha_names.append(alpha_name)
-        alpha_types.append(alpha_type)
 
-    featname_mhc1_mhc2_peptide = featname_hlacode_peptide.with_columns(
+    featname_hlaa_hlab_peptide = featname_hlacode_peptide.with_columns(
         [
-            pl.Series("mhc_1_seq", alpha_seqs),
-            pl.Series("mhc_1_name", alpha_names),
-            pl.Series("mhc_1_type", alpha_types),
-            pl.Series("mhc_2_seq", beta_seqs),
-            pl.Series("mhc_2_name", beta_names),
-            pl.Series("mhc_2_type", beta_types),
+            pl.Series("hla_a_seq", alpha_seqs),
+            pl.Series("hla_a_name", alpha_names),
+            pl.Series("hla_b_seq", beta_seqs),
+            pl.Series("hla_b_name", beta_names),
         ]
     )
-    featname_mhc1_mhc2_peptide.drop_in_place("mhc_code")
-    return featname_mhc1_mhc2_peptide
+    featname_hlaa_hlab_peptide.drop_in_place("hla_code")
+    return featname_hlaa_hlab_peptide
+
+
+# class HLACodeCSVConverter(MHCCodeConverter):
+#     def __init__(self, dir="./HLA_seqs"):
+#         dir_path = Path(dir)
+#         dqa = dir_path / ("DQA_allele_seqs.csv")
+#         self.dqa = pl.read_csv(
+#             dqa, has_header=False, new_columns=["code", "seq"]
+#         )
+
+#         dqb = dir_path / ("DQB_allele_seqs.csv")
+#         self.dqb = pl.read_csv(
+#             dqb, has_header=False, new_columns=["code", "seq"]
+#         )
+
+#         drb = dir_path / ("DRB_allele_seqs.csv")
+#         self.drb = pl.read_csv(
+#             drb, has_header=False, new_columns=["code", "seq"]
+#         )
+
+#     def get_sequence(self, official_name, topological_only=False):
+#         if official_name.startswith("DQA"):
+#             query = self.dqa.filter(pl.col("code") == official_name)
+#         elif official_name.startswith("DQB"):
+#             query = self.dqb.filter(pl.col("code") == official_name)
+#         elif official_name.startswith("DRB"):
+#             query = self.drb.filter(pl.col("code") == official_name)
+#         else:
+#             raise ValueError("Invalid MHC allele")
+
+#         if query.height == 0:
+#             raise ValueError(f"No sequence found for allele {official_name}")
+#         if query.height > 1:
+#             raise ValueError(
+#                 f"Multiple sequences found for allele {official_name}"
+#             )
+
+#         seq = query.select("seq").to_series().item()
+
+#         if official_name.startswith("DRB") and topological_only:
+#             seq = seq[DRB_TOPOLOGY_DOMAIN]
+
+#         return seq
+
+
+def parse_cresta_dirs(directory_paths: list):
+    tmp_dfs = []
+    for directory_path in directory_paths:
+        cro = CellRangerOutput(directory_path)
+        donor_num = cro.donor_num
+        cognate_df = construct_cognate_df(cro).with_columns(
+            pl.lit(1, dtype=pl.Boolean).alias("cognate"),
+            pl.lit(donor_num, dtype=pl.Int32).alias("participant_id"),
+        )
+        tmp_dfs.append(cognate_df)
+    return pl.concat(tmp_dfs)
 
 
 if __name__ == "__main__":
@@ -1111,95 +1228,24 @@ if __name__ == "__main__":
         required=True,
     )
     parser.add_argument(
-        "-o",
-        "--output",
-        help="Output CSV path",
-        default="cresta_output.csv",
-    )
-    parser.add_argument(
-        "-fp",
-        "--focal_p_thresh",
-        help="Focal P value threshold",
+        "-p",
+        "--p_value",
+        help="P value threshold",
         required=False,
         default=10,
     )
     parser.add_argument(
-        "-ff",
-        "--focal_fold_thresh",
-        help="Focal fold change threshold",
+        "-f",
+        "--fold_value",
+        help="Fold change threshold",
         required=False,
         default=0.3,
     )
-    parser.add_argument(
-        "-bp",
-        "--bind_p_thresh",
-        help="Binding P value threshold",
-        required=False,
-        default=2.5,
-    )
-    parser.add_argument(
-        "-bf",
-        "--bind_fold_thresh",
-        help="Binding fold change threshold",
-        required=False,
-        default=1.25,
-    )
-    parser.add_argument(
-        "-fbc",
-        "--filt_bc_matrix",
-        help="Use filtered barcode matrix",
-        required=False,
-        action="store_true",
-    )
-    parser.add_argument(
-        "-f",
-        "--focal_fnames",
-        help="Provide a comma-separated list of focal feature names to override thresholded "
-        "focal features. '-fp' and '-ff' will be ignored.",
-        required=False,
-    )
-    # add args for logfold change thresh and p val thresh
     # parser.add_argument(
     #     "-s2", "--structure_2", help="Second structure", required=True
     # )
     args = parser.parse_args()
-    focal_p_thresh = float(args.focal_p_thresh)
-    focal_fold_thresh = float(args.focal_fold_thresh)
-    bind_p_thresh = float(args.bind_p_thresh)
-    bind_fold_thresh = float(args.bind_fold_thresh)
-    use_filt_bc_matrix = args.filt_bc_matrix
 
-    directory_paths = [d.strip() for d in args.directories.split(",")]
-    focalfeatnames = None
-    if args.focal_fnames is not None:
-        focalfeatnames = [
-            featname.strip() for featname in args.focal_fnames.split(",")
-        ]
-
-    cro_list = []
-    donor_num = None
-    for directory_path in directory_paths:
-        cro = CellRangerOutput(
-            directory_path, filtered_bc_matrix=use_filt_bc_matrix
-        )
-        if donor_num is None:
-            donor_num = cro.donor_num
-        elif cro.donor_num != donor_num:
-            raise ValueError(
-                "This script is intended for multiple runs of the "
-                f"same donor. Donors {donor_num} and {cro.donor_num} "
-                "were detected."
-            )
-        cro_list.append(cro)
-    cognate_df = construct_cognate_df(
-        cro_list,
-        focal_p_thresh,
-        focal_fold_thresh,
-        bind_p_thresh,
-        bind_fold_thresh,
-    ).with_columns(
-        pl.lit(1, dtype=pl.Boolean).alias("cognate"),
-        pl.lit(donor_num, dtype=pl.Int32).alias("participant_id"),
-    )
-
-    cognate_df.collect().write_csv(args.output)
+    dirs = [d.strip() for d in args.directories.split(",")]
+    out_df = parse_cresta_dirs(dirs)
+    out_df.to_csv("cresta_data.csv")

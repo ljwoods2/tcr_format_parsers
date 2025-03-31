@@ -1,0 +1,17 @@
+name: tcr_format_parsers_test
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - pip
+  - scipy
+  - numpy
+  - polars
+  - h5py
+  - requests
+  - anarci
+  - editdistance
+
+  - pip:
+    - Stitchr
+    - tidytcells
