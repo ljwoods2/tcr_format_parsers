@@ -8,13 +8,22 @@ job_name,cognate,peptide,mhc_class,mhc_1_chain,mhc_1_species,mhc_1_name,mhc_1_se
 ```
 
 `job_name`: A unique name for the row for downstream use
+
 `cognate`: "true" or "false" string indicating if the triad binds or not
+
 `peptide`: The peptide's amino acid sequence
+
 `mhc_class`: "I" or "II"
+
 `mhc_<1/2>_chain`: "alpha"/"beta"/"heavy"/"light"
+
 `tcr_<1/2>_chain`: "alpha"/"beta"
+
 `<type>_<1/2>_species`: Species of origin for the chain ("human"/"mouse")
+
 `<type>_<1/2>_seq`: Amino acid sequence for the triad chain
+
+Additionally, for pMHC-only tasks, just exclude the tcr-related columns (for example, for use with [af3-nf](https://github.com/ljwoods2/af3-nf) pMHC-only prediction pipelines)
 
 ## Installation
 
