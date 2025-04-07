@@ -21,4 +21,4 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["tcr_format_parsers"]
+packages = ["tcr_format_parsers", "tcr_format_parsers.common"]
