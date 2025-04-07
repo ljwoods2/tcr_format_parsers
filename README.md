@@ -51,7 +51,7 @@ stitchrdl -s human
 
 ### Pip only
 
-Install [hmmer=3.3.2](http://hmmer.org/) (a dependency for ANARCI)
+Install [ANARCI](https://github.com/oxpig/ANARCI).
 
 Then, clone this repo and install:
 ```bash
