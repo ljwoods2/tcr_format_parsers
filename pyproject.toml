@@ -17,7 +17,7 @@ dependencies = [
     "requests",
     "Stitchr",
     "tidytcells",
-    "git+https://github.com/oxpig/ANARCI",
+    "git+https://github.com/oxpig/ANARCI.git@master",
     "editdistance",
 ]
 
