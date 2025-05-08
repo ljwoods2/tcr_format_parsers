@@ -18,7 +18,8 @@ dependencies = [
     "Stitchr",
     "tidytcells",
     "editdistance",
-    "biopython"
+    "biopython",
+    "tcrdist3",
 ]
 
 [tool.setuptools]

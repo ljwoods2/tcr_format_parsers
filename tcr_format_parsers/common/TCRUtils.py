@@ -4,6 +4,7 @@ import numpy as np
 import warnings
 import difflib
 import polars as pl
+from tcrdist.repertoire import TCRrep
 
 
 def hash_tcr_sequence(tcr_seq: str, hash_type: str = "md5") -> str:
@@ -273,7 +274,7 @@ def standardize_stitchr_tcr(tcr_seq, tcr_chain, species, j_gene):
         #         return tcr_seq
 
 
-def annotate_tcr(tcr_seq, resindices, tcr_chain, species):
+def annotate_tcr(tcr_seq, resindices, tcr_chain, species, strict=False):
     """Return the resindices of a contiguous substring of resindices
     which aligned to a TCR seq using ANARCI"""
     if len(tcr_seq) != len(resindices):
@@ -303,11 +304,20 @@ def annotate_tcr(tcr_seq, resindices, tcr_chain, species):
         raise ValueError("Multiple domains found for sequence")
 
     # validate that the species provided is what anarci found
+    if strict:
+        if results[2][0][0]["species"] != species:
+            raise ValueError(
+                f"Species mismatch: {species} vs {results[1][0][0][1]}"
+            )
 
     numbering = results[1][0][0]
 
     sub_start = numbering[1]
     sub_stop = numbering[2] + 1
+
+    # this entire substring will be numbered
+    # however, there may be gaps in the sequence
+    # which are given an IMGT number
     numbered_substring = tcr_seq[sub_start:sub_stop]
     resindices_slice = resindices[sub_start:sub_stop]
     imgt_num = np.zeros((len(range(sub_start, sub_stop)),), dtype=np.int32)
@@ -328,4 +338,157 @@ def annotate_tcr(tcr_seq, resindices, tcr_chain, species):
             f"0 is not an IMGT number. Numbering failed for TCR '{tcr_seq}'"
         )
 
-    return resindices_slice, imgt_num
+    return resindices_slice, imgt_num, (sub_start, sub_stop)
+
+
+def tcr_by_imgt_region(tcr_seq, tcr_resindices, tcr_chain, tcr_species):
+    tcr_indices, imgt_num, _ = annotate_tcr(
+        tcr_seq,
+        tcr_resindices,
+        tcr_chain,
+        tcr_species,
+    )
+
+    tcr_residx_dict = {}
+
+    tcr_residx_dict["fwr_1"] = tcr_indices[
+        ((imgt_num >= 1) & (imgt_num <= 26))
+    ]
+
+    tcr_residx_dict["cdr_1"] = tcr_indices[
+        ((imgt_num >= 27) & (imgt_num <= 38))
+    ]
+
+    tcr_residx_dict["fwr_2"] = tcr_indices[
+        ((imgt_num >= 39) & (imgt_num <= 55))
+    ]
+
+    tcr_residx_dict["cdr_2"] = tcr_indices[
+        ((imgt_num >= 56) & (imgt_num <= 65))
+    ]
+
+    tcr_residx_dict["fwr_3"] = tcr_indices[
+        ((imgt_num >= 66) & (imgt_num <= 103))
+    ]
+
+    tcr_residx_dict["cdr_2_5"] = tcr_indices[
+        ((imgt_num >= 81) & (imgt_num <= 86))
+    ]
+
+    tcr_residx_dict["cdr_3"] = tcr_indices[
+        ((imgt_num >= 104) & (imgt_num <= 118))
+    ]
+
+    tcr_residx_dict["fwr_4"] = tcr_indices[
+        ((imgt_num >= 119) & (imgt_num <= 129))
+    ]
+
+    return tcr_residx_dict
+
+
+def pw_tcrdist(tcr_df, species=None, chains=None):
+
+    if species is None:
+        species = tcr_df[0].select("tcr_1_species").item()
+
+    if chains is None:
+        chain_1 = tcr_df[0].select("tcr_1_chain").item()
+        chain_2 = tcr_df[0].select("tcr_2_chain").item()
+
+        chains = [chain_1, chain_2]
+
+    tcr_df_pd = tcr_df.with_columns(
+        pl.col("tcr_1_cdr_3").alias("cdr3_a_aa"),
+        pl.col("tcr_2_cdr_3").alias("cdr3_b_aa"),
+        pl.col("tcr_1_v_gene").alias("v_a_gene"),
+        pl.col("tcr_2_v_gene").alias("v_b_gene"),
+        pl.col("tcr_1_j_gene").alias("j_a_gene"),
+        pl.col("tcr_2_j_gene").alias("j_b_gene"),
+        pl.lit(1).alias("count"),
+    ).to_pandas()
+
+    #     {
+    #         # allow these to be inferred
+    #         # "tcr_1_cdr_1": "cdr1_a_aa",
+    #         # "tcr_1_cdr_2": "cdr2_a_aa",
+    #         "tcr_1_cdr_3": "cdr3_a_aa",
+    #         # "tcr_2_cdr_1": "cdr1_b_aa",
+    #         # "tcr_2_cdr_2": "cdr2_b_aa",
+    #         "tcr_2_cdr_3": "cdr3_b_aa",
+    #         "tcr_1_v_gene": "v_a_gene",
+    #         "tcr_2_v_gene": "v_b_gene",
+    #         "tcr_1_j_gene": "j_a_gene",
+    #         "tcr_2_j_gene": "j_b_gene",
+    #     }
+    #
+
+    tr = TCRrep(
+        cell_df=tcr_df_pd,
+        organism=species,
+        chains=chains,
+        db_file="alphabeta_gammadelta_db.tsv",
+    )
+
+    # assert tr.pw_alpha.shape[0] == len(tcr_df_pd)
+
+    dists = tr.pw_alpha + tr.pw_beta
+
+    out_df = tr.clone_df.copy()
+
+    out_df["index"] = out_df.index
+
+    out_df.drop(
+        labels=[
+            "v_a_gene",
+            "j_a_gene",
+            "cdr3_a_aa",
+            "v_b_gene",
+            "j_b_gene",
+            "cdr3_b_aa",
+            "cdr1_a_aa",
+            "cdr2_a_aa",
+            "pmhc_a_aa",
+            "cdr1_b_aa",
+            "cdr2_b_aa",
+            "pmhc_b_aa",
+            "count",
+            "clone_id",
+        ],
+        axis=1,
+        inplace=True,
+    )
+
+    return pl.DataFrame(out_df), dists
+
+
+# https://github.com/phbradley/TCRdock/blob/c5a7af42eeb0c2a4492a4d4fe803f1f9aafb6193/algorithms_from_the_paper.py#L5
+def pick_reps(D, num_reps=50, sdev_big=120.0, sdev_small=36.0, min_size=0.5):
+    """D is a symmetric distance matrix (e.g., of TCRdist distances)
+    num_reps is the number of representatives to choose
+    sdev_big defines the neighbor-density sum used for ranking
+    sdev_small limits the redundancy
+    both sdev_big and sdev_small are in distance units (ie same units as D)
+    """
+    # the weight remaining for each instance
+    wts = np.array([1.0] * D.shape[0])
+
+    reps, sizes = [], []
+    for ii in range(num_reps):
+        if np.sum(wts) < 1e-2:
+            break
+        gauss_big = (
+            np.exp(-1 * (D / sdev_big) ** 2) * wts[:, None] * wts[None, :]
+        )
+        gauss_small = (
+            np.exp(-1 * (D / sdev_small) ** 2) * wts[:, None] * wts[None, :]
+        )
+        nbr_sum = np.sum(gauss_big, axis=1)
+        rep = np.argmax(nbr_sum)
+        size = nbr_sum[rep]
+        if size < min_size:
+            break
+        wts = np.maximum(0.0, wts - gauss_small[rep, :] / wts[rep])
+        assert wts[rep] < 1e-3
+        reps.append(rep)
+        sizes.append(size)
+    return reps, sizes
