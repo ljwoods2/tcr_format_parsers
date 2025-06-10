@@ -72,9 +72,11 @@ FORMAT_MHC_COLS = [
 TCRDIST_COLS = [
     "tcr_1_cdr_1",
     "tcr_1_cdr_2",
+    "tcr_1_cdr_2_5",
     "tcr_1_cdr_3",
     "tcr_2_cdr_1",
     "tcr_2_cdr_2",
+    "tcr_2_cdr_2_5",
     "tcr_2_cdr_3",
 ]
 
