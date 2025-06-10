@@ -1,6 +1,10 @@
 import editdistance
 import polars as pl
-from tcr_format_parsers.common.TCRUtils import hash_tcr_sequence, pw_tcrdist
+from tcr_format_parsers.common.TCRUtils import (
+    hash_tcr_sequence,
+    pw_tcrdist,
+    shorten_tcr_to_vregion,
+)
 import numpy as np
 from tcrdist.repertoire import TCRrep
 from tcrdist.diversity import (
@@ -72,10 +76,6 @@ TCRDIST_COLS = [
     "tcr_2_cdr_1",
     "tcr_2_cdr_2",
     "tcr_2_cdr_3",
-    "tcr_1_v_gene",
-    "tcr_2_v_gene",
-    "tcr_1_j_gene",
-    "tcr_2_j_gene",
 ]
 
 
@@ -253,7 +253,11 @@ SOURCE_REV_RENAME_DICT = {
 #     noncognate = noncognate.select(FORMAT_COLS + TCRDIST_COLS)
 #     return noncognate
 def generate_all_possible_negs(
-    df, tcrdist_thresh=120, pmhc_edit_thresh=3, cross_class=False
+    df,
+    tcrdist_thresh=120,
+    pmhc_edit_thresh=3,
+    cross_class=False,
+    use_provided_cdr=False,
 ):
     """
     DF must contain FORMAT_COLS as well as TCRDIST_COLS
@@ -262,11 +266,18 @@ def generate_all_possible_negs(
     """
     tmp_dfs = []
 
-    all_antigens = df.select(FORMAT_ANTIGEN_COLS).unique()
-    all_tcrs = df.select(FORMAT_TCR_COLS + TCRDIST_COLS).unique()
-    all_tcrs, dist_mtx = pw_tcrdist(all_tcrs)
+    if use_provided_cdr:
+        tcrdist_cols = TCRDIST_COLS + ["tcr_1_cdr_2_5", "tcr_2_cdr_2_5"]
+    else:
+        tcrdist_cols = TCRDIST_COLS
 
-    df_with_idx = df.join(all_tcrs, on=FORMAT_TCR_COLS + TCRDIST_COLS)
+    all_antigens = df.select(FORMAT_ANTIGEN_COLS).unique()
+    all_tcrs = df.select(FORMAT_TCR_COLS + tcrdist_cols).unique()
+    all_tcrs, dist_mtx = pw_tcrdist(
+        all_tcrs, use_provided_cdr=use_provided_cdr
+    )
+
+    df_with_idx = df.join(all_tcrs, on=FORMAT_TCR_COLS + tcrdist_cols)
     found_set = set()
 
     for row in df.select(FORMAT_ANTIGEN_COLS).unique().iter_rows(named=True):
@@ -402,7 +413,7 @@ def generate_all_possible_negs(
 
         tmp_df = (
             df_with_idx.join(tmp_idx, on="index")
-            .select(FORMAT_TCR_COLS + TCRDIST_COLS + FORMAT_ANTIGEN_COLS)
+            .select(FORMAT_TCR_COLS + tcrdist_cols + FORMAT_ANTIGEN_COLS)
             .unique()
         )
 
@@ -414,9 +425,9 @@ def generate_all_possible_negs(
             antigen.join(
                 df_with_idx.join(tmp_idx, on="index")
                 .rename(SOURCE_RENAME_DICT)
-                .select(FORMAT_TCR_COLS + TCRDIST_COLS + SOURCE_ANTIGEN_COLS)
+                .select(FORMAT_TCR_COLS + tcrdist_cols + SOURCE_ANTIGEN_COLS)
                 .group_by(FORMAT_TCR_COLS + SOURCE_ANTIGEN_COLS)
-                .agg(pl.col(colname).first() for colname in TCRDIST_COLS)
+                .agg(pl.col(colname).first() for colname in tcrdist_cols)
                 .unique(),
                 how="cross",
             )
@@ -428,14 +439,14 @@ def generate_all_possible_negs(
     noncognate = generate_job_name(noncognate)
     noncognate = noncognate.with_columns(pl.lit(False).alias("cognate"))
     noncognate = (
-        noncognate.select(FORMAT_COLS + TCRDIST_COLS + SOURCE_ANTIGEN_COLS)
+        noncognate.select(FORMAT_COLS + tcrdist_cols + SOURCE_ANTIGEN_COLS)
         .group_by(FORMAT_COLS)
         .agg(
-            [pl.col(colname).first() for colname in TCRDIST_COLS]
+            [pl.col(colname).first() for colname in tcrdist_cols]
             + SOURCE_ANTIGEN_COLS
         )
         .explode(SOURCE_ANTIGEN_COLS)
-    ).select(FORMAT_COLS + TCRDIST_COLS + SOURCE_ANTIGEN_COLS)
+    ).select(FORMAT_COLS + tcrdist_cols + SOURCE_ANTIGEN_COLS)
     return noncognate
 
 
@@ -784,3 +795,25 @@ def per_antigen_diversity(df, species=None, chains=None, thresh=120):
         )
 
     return pl.concat(tmp_dfs, how="vertical_relaxed")
+
+
+def shorten_tcrs(row):
+    # for recovering original row if needed
+    row["orig_job_name"] = row["job_name"]
+
+    row["tcr_1_seq"] = shorten_tcr_to_vregion(
+        row["tcr_1_seq"], "alpha", row["tcr_1_species"]
+    )
+
+    row["tcr_2_seq"] = shorten_tcr_to_vregion(
+        row["tcr_2_seq"], "beta", row["tcr_2_species"]
+    )
+
+    row["job_name"] = hash_tcr_sequence(
+        row["peptide"]
+        + row["mhc_1_seq"]
+        + row["mhc_2_seq"]
+        + row["tcr_1_seq"]
+        + row["tcr_2_seq"]
+    )
+    return row
